@@ -19,6 +19,7 @@ private:
     uint8_t dtPin;
     uint8_t swPin;
     uint8_t previousState;
+    int8_t position;
     bool previousButtonState;
     unsigned long lastButtonChangeMs;
 };

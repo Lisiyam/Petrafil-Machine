@@ -2,6 +2,13 @@
 
 namespace {
 constexpr unsigned long ButtonDebounceMs = 40;
+
+constexpr int8_t TransitionTable[16] = {
+     0, -1,  1,  0,
+     1,  0,  0, -1,
+    -1,  0,  0,  1,
+     0,  1, -1,  0
+};
 }
 
 RotaryEncoder::RotaryEncoder(uint8_t clkPin, uint8_t dtPin, uint8_t swPin)
@@ -9,6 +16,7 @@ RotaryEncoder::RotaryEncoder(uint8_t clkPin, uint8_t dtPin, uint8_t swPin)
       dtPin(dtPin),
       swPin(swPin),
       previousState(0),
+            position(0),
       previousButtonState(HIGH),
       lastButtonChangeMs(0) {}
 
@@ -26,15 +34,19 @@ EncoderEvent RotaryEncoder::read() {
 
     const uint8_t currentState = (digitalRead(clkPin) << 1) | digitalRead(dtPin);
     if (currentState != previousState) {
-        const uint8_t transition = (previousState << 2) | currentState;
+        const uint8_t transitionIndex = (previousState << 2) | currentState;
+        const int8_t movement = TransitionTable[transitionIndex];
 
-        if (transition == 0b0001 || transition == 0b0111 || transition == 0b1110 || transition == 0b1000) {
-            event.rotation = 1;
-        } else if (transition == 0b0010 || transition == 0b1011 || transition == 0b1101 || transition == 0b0100) {
-            event.rotation = -1;
-        }
-
+        position += movement;
         previousState = currentState;
+
+        if (position >= 4) {
+            event.rotation = 1;
+            position = 0;
+        } else if (position <= -4) {
+            event.rotation = -1;
+            position = 0;
+        }
     }
 
     const bool buttonState = digitalRead(swPin);

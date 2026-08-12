@@ -7,9 +7,9 @@ constexpr uint8_t LcdAddress = 0x27;
 constexpr uint8_t LcdColumns = 20;
 constexpr uint8_t LcdRows = 4;
 
-constexpr uint8_t EncoderClkPin = 32;
-constexpr uint8_t EncoderDtPin = 33;
-constexpr uint8_t EncoderSwPin = 25;
+constexpr uint8_t EncoderClkPin = 19;
+constexpr uint8_t EncoderDtPin = 18;
+constexpr uint8_t EncoderSwPin = 23;
 
 DisplayManager display(LcdAddress, LcdColumns, LcdRows);
 RotaryEncoder encoder(EncoderClkPin, EncoderDtPin, EncoderSwPin);
