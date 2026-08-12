@@ -20,7 +20,7 @@ ScreenController::ScreenController(DisplayManager& display)
       lastRenderMs(0),
       filamentCm(0),
       temperatureC(0),
-      stepperValue(0) {}
+            stepperValue(0) {}
 
 void ScreenController::begin() {
     loadingStartedMs = millis();
@@ -99,7 +99,7 @@ void ScreenController::renderLoading(uint8_t progress, const String& status) {
 void ScreenController::renderHome() {
     display.printPadded(0, 0, " PETRAFILE MACHINE ", 20);
     display.printPadded(0, 1, "filamen : " + String(filamentCm) + " cm", 20);
-    display.printPadded(0, 2, "suhu    : " + String(temperatureC) + " C  >menu", 20);
+    display.printPadded(0, 2, "suhu    : " + String(temperatureC) + " C  ", 20);
     display.printPadded(0, 3, "stepper : " + String(stepperValue), 20);
 }
 
