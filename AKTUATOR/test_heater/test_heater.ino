@@ -71,9 +71,9 @@ double pidOutput = 0.0;
 // Hotend sebenarnya harus dituning karena setiap
 // heater, nozzle, blok heater, dan insulation berbeda.
 
-double Kp = 8.0;
-double Ki = 0.4;
-double Kd = 30.0;
+double Kp = 19.192109;
+double Ki = 0.366318;
+double Kd = 251.378249;
 
 
 // DIRECT:
