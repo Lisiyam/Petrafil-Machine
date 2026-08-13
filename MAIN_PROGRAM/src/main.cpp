@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <LiquidCrystal_I2C.h>
 #include <PID_v1.h>
+#include <Preferences.h>
 #include <SPI.h>
 #include <math.h>
 
@@ -13,6 +14,7 @@ constexpr uint8_t LCD_COLUMNS = 20;
 constexpr uint8_t LCD_ROWS = 4;
 
 LiquidCrystal_I2C lcd(LCD_ADDRESS, LCD_COLUMNS, LCD_ROWS);
+Preferences preferences;
 
 
 // =====================================================
@@ -222,6 +224,8 @@ constexpr int MIN_SETPOINT_C = 0;
 constexpr int MAX_SETPOINT_C = 270;
 constexpr int MIN_STEPPER_SPEED = 0;
 constexpr int MAX_STEPPER_SPEED = 255;
+constexpr int DEFAULT_SETPOINT_C = 260;
+constexpr int DEFAULT_STEPPER_SPEED = 0;
 
 
 // =====================================================
@@ -496,6 +500,14 @@ void editSelectedValue(int8_t direction) {
   }
 }
 
+void saveCurrentParameter() {
+  if (cursor == MenuItem::Temperature) {
+    preferences.putInt("setpoint", static_cast<int>(setpointC));
+  } else if (cursor == MenuItem::Stepper) {
+    preferences.putUChar("stepper", stepperSpeed);
+  }
+}
+
 void selectCurrentItem() {
   if (cursor == MenuItem::FilamentReset) {
     filamentLengthCm = 0;
@@ -508,6 +520,10 @@ void selectCurrentItem() {
     editMode = false;
     renderHome();
     return;
+  }
+
+  if (editMode) {
+    saveCurrentParameter();
   }
 
   editMode = !editMode;
@@ -620,6 +636,10 @@ void setup() {
   lcd.init();
   lcd.backlight();
   lcd.clear();
+
+  preferences.begin("petrafil", false);
+  setpointC = preferences.getInt("setpoint", DEFAULT_SETPOINT_C);
+  stepperSpeed = preferences.getUChar("stepper", DEFAULT_STEPPER_SPEED);
 
   pinMode(ADS_CS, OUTPUT);
   digitalWrite(ADS_CS, HIGH);
