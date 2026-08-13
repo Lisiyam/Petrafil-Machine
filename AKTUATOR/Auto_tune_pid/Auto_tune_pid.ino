@@ -24,28 +24,21 @@
 
 
 // =====================================================
-// SPI ADS1118
+// SPI
 // =====================================================
 
 SPISettings adsSPI(1000000, MSBFIRST, SPI_MODE1);
 
 
 // =====================================================
-// KONFIGURASI ADS1118
-// =====================================================
-//
-// MUX  = AIN0 terhadap GND
-// PGA  = +/- 4.096 V
-// MODE = Single-shot
-// DR   = 128 SPS
-//
+// ADS1118 CONFIG
 // =====================================================
 
 const uint16_t ADS_CONFIG = 0xC383;
 
 
 // =====================================================
-// KONFIGURASI NTC
+// NTC
 // =====================================================
 
 #define VCC       3.3
@@ -61,18 +54,27 @@ const uint16_t ADS_CONFIG = 0xC383;
 
 double setpoint = 260.0;
 
+// Heater akan dimatikan jika mencapai suhu ini
 const double MAX_TEMP = 280.0;
+
+
+// =====================================================
+// TEMPERATURE & PWM
+// =====================================================
+
+double temperatureC = 0.0;
+
+// PWM AKTUAL heater
+uint8_t heaterPWM = 0;
 
 
 // =====================================================
 // PID
 // =====================================================
 
-double temperatureC = 0.0;
 double pidOutput = 0.0;
 
-// Nilai awal sebelum autotuning.
-// Setelah autotuning selesai, nilai ini akan diganti.
+// Nilai awal
 double Kp = 8.0;
 double Ki = 0.4;
 double Kd = 30.0;
@@ -89,7 +91,7 @@ PID hotendPID(
 
 
 // =====================================================
-// MODE SISTEM
+// MODE
 // =====================================================
 
 enum SystemMode
@@ -101,39 +103,35 @@ enum SystemMode
   MODE_FAULT
 };
 
-SystemMode mode = MODE_PID;
+SystemMode mode = MODE_STOPPED;
 
 
 // =====================================================
 // AUTOTUNE
 // =====================================================
-//
-// Relay autotuning:
-//
-// HIGH output = 210
-// LOW output  = 30
-//
-// Relay amplitude d:
-//
-// d = (210 - 30) / 2 = 90
-//
-// Hysteresis = +/- 2°C
-//
-// =====================================================
 
-const double AT_HIGH_OUTPUT = 210.0;
-const double AT_LOW_OUTPUT  = 30.0;
+// Warmup menggunakan full power
+const uint8_t AT_WARMUP_PWM = 255;
 
-const double AT_RELAY_AMPLITUDE =
-  (AT_HIGH_OUTPUT - AT_LOW_OUTPUT) / 2.0;
+// Mulai relay ketika suhu sudah mendekati target
+const double AT_START_TEMP = 258.0;
 
-const double AT_HYSTERESIS = 2.0;
 
+// Relay HIGH/LOW
+const uint8_t AT_HIGH_PWM = 255;
+const uint8_t AT_LOW_PWM  = 0;
+
+
+// Hysteresis relay
+const double AT_HYSTERESIS = 5.0;
+
+
+// Jumlah osilasi yang dibutuhkan
 const int AT_REQUIRED_PEAKS = 6;
 const int AT_REQUIRED_TROUGHS = 6;
 
 
-// Penyimpanan hasil autotune
+// Data peak/trough
 double peakValues[8];
 double troughValues[8];
 
@@ -144,17 +142,32 @@ int troughCount = 0;
 
 bool relayHigh = true;
 
-unsigned long autotuneStartTime = 0;
-unsigned long lastPeakTime = 0;
+
+// =====================================================
+// WARMUP MONITOR
+// =====================================================
+
+unsigned long warmupStartTime = 0;
+
+double warmupStartTemperature = 0;
+
+unsigned long lastWarmupCheck = 0;
+
+double lastWarmupTemperature = 0;
 
 
 // =====================================================
-// PWM
+// SET HEATER PWM
 // =====================================================
 
 void setHeaterPWM(uint8_t pwm)
 {
-  ledcWrite(HEATER_PIN, pwm);
+  heaterPWM = pwm;
+
+  ledcWrite(
+    HEATER_PIN,
+    pwm
+  );
 }
 
 
@@ -181,7 +194,7 @@ uint16_t readADS1118()
 
 
 // =====================================================
-// KONVERSI RESISTANSI NTC -> SUHU
+// NTC -> TEMPERATURE
 // =====================================================
 
 float calculateTemperature(float resistance)
@@ -204,20 +217,22 @@ float calculateTemperature(float resistance)
 
 
 // =====================================================
-// BACA TEMPERATUR
+// READ TEMPERATURE
 // =====================================================
 
 float readTemperature()
 {
-  // Mulai conversion
+  // Start conversion
   readADS1118();
 
+  // ADS1118 @ 128 SPS
   delay(10);
 
-  // Ambil hasil conversion
+  // Read conversion result
   uint16_t raw = readADS1118();
 
-  int16_t signedRaw = (int16_t)raw;
+  int16_t signedRaw =
+    (int16_t)raw;
 
 
   // ADC -> voltage
@@ -226,11 +241,15 @@ float readTemperature()
     signedRaw * 4.096 / 32768.0;
 
 
-  // Voltage -> resistance
+  // Voltage -> NTC resistance
 
   float ntcResistance = NAN;
 
-  if (voltage > 0.001 && voltage < VCC)
+
+  if (
+    voltage > 0.001 &&
+    voltage < VCC
+  )
   {
     ntcResistance =
       R_BOTTOM *
@@ -242,23 +261,24 @@ float readTemperature()
 
   if (!isnan(ntcResistance))
   {
-    return calculateTemperature(ntcResistance);
+    return calculateTemperature(
+      ntcResistance
+    );
   }
+
 
   return NAN;
 }
 
 
 // =====================================================
-// RESET AUTOTUNE DATA
+// RESET AUTOTUNE
 // =====================================================
 
 void resetAutotuneData()
 {
   peakCount = 0;
   troughCount = 0;
-
-  lastPeakTime = 0;
 
   for (int i = 0; i < 8; i++)
   {
@@ -270,61 +290,110 @@ void resetAutotuneData()
 
 
 // =====================================================
-// MULAI AUTOTUNE
+// START AUTOTUNE
 // =====================================================
 
 void startAutotune()
 {
   Serial.println();
   Serial.println("========================================");
-  Serial.println("         AUTOTUNE DIMULAI");
+  Serial.println("        AUTOTUNE DIMULAI");
   Serial.println("========================================");
 
-  Serial.println("Pastikan nozzle/hotend aman.");
-  Serial.println("Jangan memasukkan PET selama autotuning.");
   Serial.println();
+  Serial.println("WARNING:");
+  Serial.println("- Jangan memasukkan PET.");
+  Serial.println("- Pastikan heater dan NTC terpasang.");
+  Serial.println("- Pastikan sistem dapat membuang panas.");
+  Serial.println();
+
 
   resetAutotuneData();
 
-  autotuneStartTime = millis();
 
+  warmupStartTime = millis();
+
+  lastWarmupCheck = millis();
+
+  warmupStartTemperature =
+    temperatureC;
+
+  lastWarmupTemperature =
+    temperatureC;
+
+
+  // PID tidak digunakan saat autotune
   hotendPID.SetMode(MANUAL);
 
-  pidOutput = 0;
 
-  // Masuk fase pemanasan awal
-  mode = MODE_AUTOTUNE_WARMUP;
+  // ===================================================
+  // FULL POWER
+  // ===================================================
 
-  setHeaterPWM(180);
+  setHeaterPWM(
+    AT_WARMUP_PWM
+  );
 
-  Serial.println("Heating menuju area autotuning...");
+
+  mode =
+    MODE_AUTOTUNE_WARMUP;
+
+
+  Serial.println(
+    "Warmup PWM = 255"
+  );
+
+  Serial.println(
+    "Menunggu suhu mencapai 250 C..."
+  );
+
+  Serial.println();
 }
 
 
 // =====================================================
-// MULAI RELAY AUTOTUNE
+// START RELAY AUTOTUNE
 // =====================================================
 
 void startRelayAutotune()
 {
   Serial.println();
   Serial.println("========================================");
-  Serial.println("       RELAY AUTOTUNE DIMULAI");
+  Serial.println("        RELAY AUTOTUNE DIMULAI");
   Serial.println("========================================");
 
-  Serial.print("Setpoint      : ");
-  Serial.print(setpoint);
-  Serial.println(" C");
+  Serial.print(
+    "Setpoint = "
+  );
 
-  Serial.print("Output HIGH   : ");
-  Serial.println(AT_HIGH_OUTPUT);
+  Serial.print(
+    setpoint
+  );
 
-  Serial.print("Output LOW    : ");
-  Serial.println(AT_LOW_OUTPUT);
+  Serial.println(
+    " C"
+  );
 
-  Serial.print("Hysteresis    : +/- ");
-  Serial.print(AT_HYSTERESIS);
-  Serial.println(" C");
+
+  Serial.println(
+    "Relay HIGH = 255"
+  );
+
+  Serial.println(
+    "Relay LOW  = 0"
+  );
+
+  Serial.print(
+    "Hysteresis = +/- "
+  );
+
+  Serial.print(
+    AT_HYSTERESIS
+  );
+
+  Serial.println(
+    " C"
+  );
 
   Serial.println();
 
@@ -332,22 +401,296 @@ void startRelayAutotune()
   resetAutotuneData();
 
 
-  // Mulai dari HIGH
   relayHigh = true;
 
-  setHeaterPWM((uint8_t)AT_HIGH_OUTPUT);
 
-  mode = MODE_AUTOTUNE_RELAY;
+  setHeaterPWM(
+    AT_HIGH_PWM
+  );
+
+
+  mode =
+    MODE_AUTOTUNE_RELAY;
 }
 
 
 // =====================================================
-// SELESAIKAN AUTOTUNE
+// WARMUP PROCESS
+// =====================================================
+
+void processAutotuneWarmup()
+{
+  // Selalu full power
+  setHeaterPWM(
+    AT_WARMUP_PWM
+  );
+
+
+  // ---------------------------------------------------
+  // Sudah mencapai suhu untuk mulai autotune?
+  // ---------------------------------------------------
+
+  if (
+    temperatureC >=
+    AT_START_TEMP
+  )
+  {
+    Serial.println();
+    Serial.println(
+      "Suhu sudah mencapai 250 C."
+    );
+
+    Serial.println(
+      "Masuk ke RELAY AUTOTUNE."
+    );
+
+    startRelayAutotune();
+
+    return;
+  }
+
+
+  // ---------------------------------------------------
+  // MONITOR WARMUP
+  // ---------------------------------------------------
+
+  if (
+    millis() - lastWarmupCheck >= 30000
+  )
+  {
+    double deltaTemperature =
+      temperatureC -
+      lastWarmupTemperature;
+
+
+    Serial.print(
+      "Warmup 30s: "
+    );
+
+    Serial.print(
+      deltaTemperature,
+      2
+    );
+
+    Serial.println(
+      " C"
+    );
+
+
+    // Jika kenaikan sangat kecil
+    if (
+      deltaTemperature < 0.5
+    )
+    {
+      Serial.println(
+        "WARNING: kenaikan suhu sangat kecil."
+      );
+
+      Serial.println(
+        "Periksa heater, MOSFET, power supply,"
+      );
+
+      Serial.println(
+        "thermal contact, dan insulation."
+      );
+
+      Serial.println();
+    }
+
+
+    lastWarmupTemperature =
+      temperatureC;
+
+    lastWarmupCheck =
+      millis();
+  }
+}
+
+
+// =====================================================
+// RELAY AUTOTUNE
+// =====================================================
+
+void processRelayAutotune()
+{
+  unsigned long now =
+    millis();
+
+
+  // ---------------------------------------------------
+  // SAFETY
+  // ---------------------------------------------------
+
+  if (
+    temperatureC >= MAX_TEMP
+  )
+  {
+    setHeaterPWM(0);
+
+    Serial.println();
+    Serial.println(
+      "AUTOTUNE ABORT!"
+    );
+
+    Serial.println(
+      "Overtemperature."
+    );
+
+    mode =
+      MODE_FAULT;
+
+    return;
+  }
+
+
+  // ---------------------------------------------------
+  // HIGH
+  // ---------------------------------------------------
+
+  if (relayHigh)
+  {
+    setHeaterPWM(
+      AT_HIGH_PWM
+    );
+
+
+    if (
+      temperatureC >=
+      setpoint + AT_HYSTERESIS
+    )
+    {
+      // Simpan peak
+      if (peakCount < 8)
+      {
+        peakValues[
+          peakCount
+        ] = temperatureC;
+
+        peakTimes[
+          peakCount
+        ] = now;
+
+        peakCount++;
+      }
+
+
+      Serial.print(
+        "PEAK #"
+      );
+
+      Serial.print(
+        peakCount
+      );
+
+      Serial.print(
+        " = "
+      );
+
+      Serial.print(
+        temperatureC,
+        2
+      );
+
+      Serial.println(
+        " C"
+      );
+
+
+      relayHigh = false;
+
+
+      setHeaterPWM(
+        AT_LOW_PWM
+      );
+    }
+  }
+
+
+  // ---------------------------------------------------
+  // LOW
+  // ---------------------------------------------------
+
+  else
+  {
+    setHeaterPWM(
+      AT_LOW_PWM
+    );
+
+
+    if (
+      temperatureC <=
+      setpoint - AT_HYSTERESIS
+    )
+    {
+      // Simpan trough
+
+      if (troughCount < 8)
+      {
+        troughValues[
+          troughCount
+        ] = temperatureC;
+
+        troughCount++;
+      }
+
+
+      Serial.print(
+        "TROUGH #"
+      );
+
+      Serial.print(
+        troughCount
+      );
+
+      Serial.print(
+        " = "
+      );
+
+      Serial.print(
+        temperatureC,
+        2
+      );
+
+      Serial.println(
+        " C"
+      );
+
+
+      relayHigh = true;
+
+
+      setHeaterPWM(
+        AT_HIGH_PWM
+      );
+    }
+  }
+
+
+  // ---------------------------------------------------
+  // CHECK DATA
+  // ---------------------------------------------------
+
+  if (
+    peakCount >=
+      AT_REQUIRED_PEAKS
+    &&
+    troughCount >=
+      AT_REQUIRED_TROUGHS
+  )
+  {
+    finishAutotune();
+  }
+}
+
+
+// =====================================================
+// FINISH AUTOTUNE
 // =====================================================
 
 void finishAutotune()
 {
   setHeaterPWM(0);
+
 
   Serial.println();
   Serial.println("========================================");
@@ -356,89 +699,130 @@ void finishAutotune()
 
 
   // ---------------------------------------------------
-  // Hitung rata-rata peak
+  // Average peak
   // ---------------------------------------------------
 
   double peakAverage = 0;
 
-  for (int i = 0; i < peakCount; i++)
+
+  for (
+    int i = 0;
+    i < peakCount;
+    i++
+  )
   {
-    peakAverage += peakValues[i];
+    peakAverage +=
+      peakValues[i];
   }
 
-  peakAverage /= peakCount;
+
+  peakAverage /=
+    peakCount;
 
 
   // ---------------------------------------------------
-  // Hitung rata-rata trough
+  // Average trough
   // ---------------------------------------------------
 
   double troughAverage = 0;
 
-  for (int i = 0; i < troughCount; i++)
+
+  for (
+    int i = 0;
+    i < troughCount;
+    i++
+  )
   {
-    troughAverage += troughValues[i];
+    troughAverage +=
+      troughValues[i];
   }
 
-  troughAverage /= troughCount;
+
+  troughAverage /=
+    troughCount;
 
 
   // ---------------------------------------------------
-  // Amplitudo osilasi
+  // Oscillation amplitude
   // ---------------------------------------------------
 
   double amplitude =
-    (peakAverage - troughAverage) / 2.0;
+    (
+      peakAverage -
+      troughAverage
+    ) / 2.0;
 
 
   // ---------------------------------------------------
-  // Hitung periode rata-rata
-  // berdasarkan peak-to-peak
+  // Period
   // ---------------------------------------------------
 
   double periodSum = 0;
+
   int periodCount = 0;
 
-  for (int i = 1; i < peakCount; i++)
+
+  for (
+    int i = 1;
+    i < peakCount;
+    i++
+  )
   {
     double period =
-      (peakTimes[i] - peakTimes[i - 1]) / 1000.0;
+      (
+        peakTimes[i] -
+        peakTimes[i - 1]
+      ) / 1000.0;
+
 
     periodSum += period;
+
     periodCount++;
   }
 
 
-  if (amplitude <= 0 || periodCount <= 0)
+  if (
+    amplitude <= 0 ||
+    periodCount <= 0
+  )
   {
-    Serial.println("Autotuning gagal.");
-    Serial.println("Osilasi tidak valid.");
+    Serial.println(
+      "Autotuning gagal."
+    );
 
-    mode = MODE_STOPPED;
+    Serial.println(
+      "Data osilasi tidak valid."
+    );
 
-    Serial.println();
-    Serial.println("Heater OFF.");
+    mode =
+      MODE_STOPPED;
 
     return;
   }
 
 
   double Pu =
-    periodSum / periodCount;
+    periodSum /
+    periodCount;
 
 
   // ---------------------------------------------------
-  // Ultimate gain Ku
-  //
-  // Ku = 4d / (pi*a)
-  //
-  // d = relay amplitude
-  // a = amplitude suhu
+  // Ultimate gain
   // ---------------------------------------------------
 
   double Ku =
-    (4.0 * AT_RELAY_AMPLITUDE) /
-    (PI * amplitude);
+    (
+      4.0 *
+      (
+        (AT_HIGH_PWM - AT_LOW_PWM) /
+        2.0
+      )
+    )
+    /
+    (
+      PI *
+      amplitude
+    );
 
 
   // ---------------------------------------------------
@@ -466,7 +850,7 @@ void finishAutotune()
 
 
   // ---------------------------------------------------
-  // Simpan parameter
+  // SIMPAN
   // ---------------------------------------------------
 
   Kp = newKp;
@@ -474,216 +858,169 @@ void finishAutotune()
   Kd = newKd;
 
 
-  // Update PID
-  hotendPID.SetTunings(Kp, Ki, Kd);
+  hotendPID.SetTunings(
+    Kp,
+    Ki,
+    Kd
+  );
 
 
   // ---------------------------------------------------
-  // Tampilkan hasil
+  // HASIL
   // ---------------------------------------------------
 
   Serial.println();
 
-  Serial.print("Peak average   = ");
-  Serial.print(peakAverage, 3);
-  Serial.println(" C");
+  Serial.print(
+    "Peak average   = "
+  );
 
-  Serial.print("Trough average = ");
-  Serial.print(troughAverage, 3);
-  Serial.println(" C");
+  Serial.print(
+    peakAverage,
+    3
+  );
 
-  Serial.print("Amplitude       = ");
-  Serial.print(amplitude, 3);
-  Serial.println(" C");
+  Serial.println(
+    " C"
+  );
 
-  Serial.print("Pu              = ");
-  Serial.print(Pu, 3);
-  Serial.println(" s");
 
-  Serial.print("Ku              = ");
-  Serial.println(Ku, 5);
+  Serial.print(
+    "Trough average = "
+  );
+
+  Serial.print(
+    troughAverage,
+    3
+  );
+
+  Serial.println(
+    " C"
+  );
+
+
+  Serial.print(
+    "Amplitude      = "
+  );
+
+  Serial.print(
+    amplitude,
+    3
+  );
+
+  Serial.println(
+    " C"
+  );
+
+
+  Serial.print(
+    "Pu             = "
+  );
+
+  Serial.print(
+    Pu,
+    3
+  );
+
+  Serial.println(
+    " s"
+  );
+
+
+  Serial.print(
+    "Ku             = "
+  );
+
+  Serial.println(
+    Ku,
+    6
+  );
+
+
+  Serial.println();
+  Serial.println(
+    "PID HASIL AUTOTUNE:"
+  );
+
+
+  Serial.print(
+    "Kp = "
+  );
+
+  Serial.println(
+    Kp,
+    6
+  );
+
+
+  Serial.print(
+    "Ki = "
+  );
+
+  Serial.println(
+    Ki,
+    6
+  );
+
+
+  Serial.print(
+    "Kd = "
+  );
+
+  Serial.println(
+    Kd,
+    6
+  );
+
 
   Serial.println();
 
-  Serial.println("PID hasil autotune:");
-
-  Serial.print("Kp = ");
-  Serial.println(Kp, 6);
-
-  Serial.print("Ki = ");
-  Serial.println(Ki, 6);
-
-  Serial.print("Kd = ");
-  Serial.println(Kd, 6);
-
-  Serial.println();
 
   // ---------------------------------------------------
-  // Setelah autotune langsung masuk PID
+  // Masuk PID
   // ---------------------------------------------------
 
   pidOutput = 0;
 
-  hotendPID.SetMode(AUTOMATIC);
 
-  mode = MODE_PID;
+  hotendPID.SetMode(
+    AUTOMATIC
+  );
 
-  Serial.println("Masuk ke mode PID normal.");
+
+  mode =
+    MODE_PID;
+
+
+  Serial.println(
+    "Mode PID normal aktif."
+  );
+
   Serial.println();
 }
 
 
 // =====================================================
-// PROSES AUTOTUNE WARMUP
-// =====================================================
-
-void processAutotuneWarmup()
-{
-  // Pemanasan menggunakan PWM 180
-
-  setHeaterPWM(180);
-
-
-  // Sudah mendekati setpoint?
-  if (temperatureC >= setpoint - 10.0)
-  {
-    Serial.println();
-    Serial.println("Temperatur sudah mendekati setpoint.");
-
-    setHeaterPWM(AT_HIGH_OUTPUT);
-
-    startRelayAutotune();
-  }
-}
-
-
-// =====================================================
-// PROSES RELAY AUTOTUNE
-// =====================================================
-
-void processRelayAutotune()
-{
-  unsigned long now = millis();
-
-
-  // ---------------------------------------------------
-  // Temperatur sudah terlalu tinggi
-  // ---------------------------------------------------
-
-  if (temperatureC >= MAX_TEMP)
-  {
-    setHeaterPWM(0);
-
-    Serial.println();
-    Serial.println("AUTOTUNE ABORT!");
-    Serial.println("Overtemperature.");
-
-    mode = MODE_FAULT;
-
-    return;
-  }
-
-
-  // ---------------------------------------------------
-  // RELAY HIGH
-  // ---------------------------------------------------
-
-  if (relayHigh)
-  {
-    setHeaterPWM((uint8_t)AT_HIGH_OUTPUT);
-
-
-    // Jika mencapai batas atas
-    if (temperatureC >= setpoint + AT_HYSTERESIS)
-    {
-      // Simpan peak
-      if (peakCount < 8)
-      {
-        peakValues[peakCount] = temperatureC;
-        peakTimes[peakCount] = now;
-
-        peakCount++;
-      }
-
-
-      Serial.print("PEAK #");
-      Serial.print(peakCount);
-      Serial.print(" = ");
-      Serial.print(temperatureC, 2);
-      Serial.println(" C");
-
-
-      relayHigh = false;
-
-      setHeaterPWM((uint8_t)AT_LOW_OUTPUT);
-    }
-  }
-
-
-  // ---------------------------------------------------
-  // RELAY LOW
-  // ---------------------------------------------------
-
-  else
-  {
-    setHeaterPWM((uint8_t)AT_LOW_OUTPUT);
-
-
-    // Jika mencapai batas bawah
-    if (temperatureC <= setpoint - AT_HYSTERESIS)
-    {
-      // Simpan trough
-      if (troughCount < 8)
-      {
-        troughValues[troughCount] =
-          temperatureC;
-
-        troughCount++;
-      }
-
-
-      Serial.print("TROUGH #");
-      Serial.print(troughCount);
-      Serial.print(" = ");
-      Serial.print(temperatureC, 2);
-      Serial.println(" C");
-
-
-      relayHigh = true;
-
-      setHeaterPWM((uint8_t)AT_HIGH_OUTPUT);
-    }
-  }
-
-
-  // ---------------------------------------------------
-  // Cek apakah data cukup
-  // ---------------------------------------------------
-
-  if (
-    peakCount >= AT_REQUIRED_PEAKS &&
-    troughCount >= AT_REQUIRED_TROUGHS
-  )
-  {
-    finishAutotune();
-  }
-}
-
-
-// =====================================================
-// PROSES PID NORMAL
+// PID NORMAL
 // =====================================================
 
 void processPID()
 {
-  // Pastikan PID aktif
-
-  if (hotendPID.Compute())
+  if (
+    hotendPID.Compute()
+  )
   {
     pidOutput =
-      constrain(pidOutput, 0, 255);
+      constrain(
+        pidOutput,
+        0,
+        255
+      );
 
-    setHeaterPWM((uint8_t)pidOutput);
+
+    setHeaterPWM(
+      (uint8_t)pidOutput
+    );
   }
 }
 
@@ -696,15 +1033,23 @@ bool checkSafety()
 {
   // Sensor invalid
 
-  if (isnan(temperatureC))
+  if (
+    isnan(temperatureC)
+  )
   {
     setHeaterPWM(0);
 
     Serial.println();
-    Serial.println("ERROR: SENSOR NTC INVALID!");
-    Serial.println("HEATER OFF.");
+    Serial.println(
+      "ERROR: NTC INVALID!"
+    );
 
-    mode = MODE_FAULT;
+    Serial.println(
+      "HEATER OFF."
+    );
+
+    mode =
+      MODE_FAULT;
 
     return false;
   }
@@ -712,22 +1057,47 @@ bool checkSafety()
 
   // Overtemperature
 
-  if (temperatureC >= MAX_TEMP)
+  if (
+    temperatureC >= MAX_TEMP
+  )
   {
     setHeaterPWM(0);
 
     Serial.println();
-    Serial.println("========================================");
-    Serial.println("          OVER TEMPERATURE!");
-    Serial.println("========================================");
+    Serial.println(
+      "========================================"
+    );
 
-    Serial.print("Temperature = ");
-    Serial.print(temperatureC, 2);
-    Serial.println(" C");
+    Serial.println(
+      "          OVER TEMPERATURE!"
+    );
 
-    Serial.println("HEATER OFF.");
+    Serial.println(
+      "========================================"
+    );
 
-    mode = MODE_FAULT;
+
+    Serial.print(
+      "Temperature = "
+    );
+
+    Serial.print(
+      temperatureC,
+      2
+    );
+
+    Serial.println(
+      " C"
+    );
+
+
+    Serial.println(
+      "HEATER OFF."
+    );
+
+
+    mode =
+      MODE_FAULT;
 
     return false;
   }
@@ -743,27 +1113,37 @@ bool checkSafety()
 
 void processSerial()
 {
-  if (!Serial.available())
+  if (
+    !Serial.available()
+  )
   {
     return;
   }
 
 
   String command =
-    Serial.readStringUntil('\n');
+    Serial.readStringUntil(
+      '\n'
+    );
+
 
   command.trim();
 
 
-  // ---------------------------------------------------
+  // -----------------------------------------------
   // AUTOTUNE
-  // ---------------------------------------------------
+  // -----------------------------------------------
 
-  if (command.equalsIgnoreCase("a"))
+  if (
+    command.equalsIgnoreCase("a")
+  )
   {
     if (
-      mode != MODE_AUTOTUNE_WARMUP &&
-      mode != MODE_AUTOTUNE_RELAY
+      mode !=
+        MODE_AUTOTUNE_WARMUP
+      &&
+      mode !=
+        MODE_AUTOTUNE_RELAY
     )
     {
       startAutotune();
@@ -773,55 +1153,71 @@ void processSerial()
   }
 
 
-  // ---------------------------------------------------
-  // PID NORMAL
-  // ---------------------------------------------------
+  // -----------------------------------------------
+  // PID
+  // -----------------------------------------------
 
-  if (command.equalsIgnoreCase("p"))
+  if (
+    command.equalsIgnoreCase("p")
+  )
   {
-    if (mode != MODE_FAULT)
+    if (
+      mode != MODE_FAULT
+    )
     {
-      hotendPID.SetTunings(Kp, Ki, Kd);
-      hotendPID.SetMode(AUTOMATIC);
+      hotendPID.SetTunings(
+        Kp,
+        Ki,
+        Kd
+      );
 
-      mode = MODE_PID;
+      hotendPID.SetMode(
+        AUTOMATIC
+      );
+
+      mode =
+        MODE_PID;
 
       Serial.println();
-      Serial.println("Mode PID normal aktif.");
+      Serial.println(
+        "PID normal aktif."
+      );
     }
 
     return;
   }
 
 
-  // ---------------------------------------------------
-  // STOP HEATER
-  // ---------------------------------------------------
+  // -----------------------------------------------
+  // OFF
+  // -----------------------------------------------
 
-  if (command.equalsIgnoreCase("o"))
+  if (
+    command.equalsIgnoreCase("o")
+  )
   {
     setHeaterPWM(0);
 
-    hotendPID.SetMode(MANUAL);
+    hotendPID.SetMode(
+      MANUAL
+    );
 
-    mode = MODE_STOPPED;
+    mode =
+      MODE_STOPPED;
 
     Serial.println();
-    Serial.println("HEATER OFF.");
-    Serial.println("Mode STOPPED.");
+    Serial.println(
+      "HEATER OFF."
+    );
 
     return;
   }
 
 
-  // ---------------------------------------------------
+  // -----------------------------------------------
   // SETPOINT
-  //
-  // Contoh:
   // s260
-  // s250
-  // s270
-  // ---------------------------------------------------
+  // -----------------------------------------------
 
   if (
     command.length() > 1 &&
@@ -829,7 +1225,8 @@ void processSerial()
   )
   {
     double newSetpoint =
-      command.substring(1).toFloat();
+      command.substring(1)
+      .toFloat();
 
 
     if (
@@ -837,11 +1234,21 @@ void processSerial()
       newSetpoint <= 270
     )
     {
-      setpoint = newSetpoint;
+      setpoint =
+        newSetpoint;
 
-      Serial.print("Setpoint = ");
-      Serial.print(setpoint);
-      Serial.println(" C");
+
+      Serial.print(
+        "Setpoint = "
+      );
+
+      Serial.print(
+        setpoint
+      );
+
+      Serial.println(
+        " C"
+      );
     }
     else
     {
@@ -854,27 +1261,49 @@ void processSerial()
   }
 
 
-  // ---------------------------------------------------
-  // TAMPILKAN PARAMETER
-  // ---------------------------------------------------
+  // -----------------------------------------------
+  // PID PARAMETERS
+  // -----------------------------------------------
 
-  if (command.equalsIgnoreCase("k"))
+  if (
+    command.equalsIgnoreCase("k")
+  )
   {
     Serial.println();
-    Serial.println("===== PID PARAMETERS =====");
+    Serial.println(
+      "===== PID PARAMETERS ====="
+    );
 
-    Serial.print("Kp = ");
-    Serial.println(Kp, 6);
 
-    Serial.print("Ki = ");
-    Serial.println(Ki, 6);
+    Serial.print(
+      "Kp = "
+    );
 
-    Serial.print("Kd = ");
-    Serial.println(Kd, 6);
+    Serial.println(
+      Kp,
+      6
+    );
 
-    Serial.print("Setpoint = ");
-    Serial.print(setpoint);
-    Serial.println(" C");
+
+    Serial.print(
+      "Ki = "
+    );
+
+    Serial.println(
+      Ki,
+      6
+    );
+
+
+    Serial.print(
+      "Kd = "
+    );
+
+    Serial.println(
+      Kd,
+      6
+    );
+
 
     Serial.println();
 
@@ -882,21 +1311,42 @@ void processSerial()
   }
 
 
-  // ---------------------------------------------------
+  // -----------------------------------------------
   // HELP
-  // ---------------------------------------------------
+  // -----------------------------------------------
 
-  if (command.equalsIgnoreCase("h"))
+  if (
+    command.equalsIgnoreCase("h")
+  )
   {
     Serial.println();
-    Serial.println("===== COMMAND =====");
+    Serial.println(
+      "===== COMMAND ====="
+    );
 
-    Serial.println("a     = mulai autotune");
-    Serial.println("p     = PID normal");
-    Serial.println("o     = heater OFF");
-    Serial.println("k     = tampilkan Kp Ki Kd");
-    Serial.println("s260  = setpoint 260 C");
-    Serial.println("h     = bantuan");
+    Serial.println(
+      "a     = autotune"
+    );
+
+    Serial.println(
+      "p     = PID normal"
+    );
+
+    Serial.println(
+      "o     = heater OFF"
+    );
+
+    Serial.println(
+      "k     = tampilkan PID"
+    );
+
+    Serial.println(
+      "s260  = setpoint 260 C"
+    );
+
+    Serial.println(
+      "h     = help"
+    );
 
     Serial.println();
 
@@ -905,59 +1355,102 @@ void processSerial()
 
 
   Serial.println(
-    "Command tidak dikenal. Ketik h untuk bantuan."
+    "Command tidak dikenal."
   );
 }
 
 
 // =====================================================
-// STATUS SERIAL
+// STATUS
 // =====================================================
 
 void printStatus()
 {
   static unsigned long lastPrint = 0;
 
-  if (millis() - lastPrint < 1000)
+
+  if (
+    millis() - lastPrint <
+    1000
+  )
   {
     return;
   }
 
-  lastPrint = millis();
+
+  lastPrint =
+    millis();
 
 
-  Serial.print("TEMP=");
-  Serial.print(temperatureC, 2);
+  Serial.print(
+    "TEMP="
+  );
 
-  Serial.print(" C | SET=");
-  Serial.print(setpoint, 1);
+  Serial.print(
+    temperatureC,
+    2
+  );
 
-  Serial.print(" C | PWM=");
-  Serial.print((int)pidOutput);
 
-  Serial.print(" | MODE=");
+  Serial.print(
+    " C | SET="
+  );
+
+  Serial.print(
+    setpoint,
+    1
+  );
+
+
+  Serial.print(
+    " C | PWM="
+  );
+
+  // PWM AKTUAL
+  Serial.print(
+    heaterPWM
+  );
+
+
+  Serial.print(
+    " | MODE="
+  );
 
 
   switch (mode)
   {
     case MODE_PID:
-      Serial.println("PID");
+      Serial.println(
+        "PID"
+      );
       break;
+
 
     case MODE_AUTOTUNE_WARMUP:
-      Serial.println("AUTOTUNE WARMUP");
+      Serial.println(
+        "AUTOTUNE WARMUP"
+      );
       break;
+
 
     case MODE_AUTOTUNE_RELAY:
-      Serial.println("AUTOTUNE RELAY");
+      Serial.println(
+        "AUTOTUNE RELAY"
+      );
       break;
+
 
     case MODE_STOPPED:
-      Serial.println("STOPPED");
+      Serial.println(
+        "STOPPED"
+      );
       break;
 
+
     case MODE_FAULT:
-      Serial.println("FAULT");
+      Serial.println(
+        "FAULT"
+      );
       break;
   }
 }
@@ -969,16 +1462,25 @@ void printStatus()
 
 void setup()
 {
-  Serial.begin(115200);
+  Serial.begin(
+    115200
+  );
 
 
   // ---------------------------------------------------
   // ADS1118
   // ---------------------------------------------------
 
-  pinMode(ADS_CS, OUTPUT);
+  pinMode(
+    ADS_CS,
+    OUTPUT
+  );
 
-  digitalWrite(ADS_CS, HIGH);
+  digitalWrite(
+    ADS_CS,
+    HIGH
+  );
+
 
   SPI.begin(
     ADS_SCK,
@@ -992,11 +1494,13 @@ void setup()
   // PWM
   // ---------------------------------------------------
 
-  if (!ledcAttach(
-        HEATER_PIN,
-        PWM_FREQ,
-        PWM_RES
-      ))
+  if (
+    !ledcAttach(
+      HEATER_PIN,
+      PWM_FREQ,
+      PWM_RES
+    )
+  )
   {
     Serial.println(
       "ERROR: ledcAttach gagal!"
@@ -1017,11 +1521,18 @@ void setup()
   // PID
   // ---------------------------------------------------
 
-  hotendPID.SetOutputLimits(0, 255);
+  hotendPID.SetOutputLimits(
+    0,
+    255
+  );
 
-  hotendPID.SetSampleTime(500);
+  hotendPID.SetSampleTime(
+    500
+  );
 
-  hotendPID.SetMode(AUTOMATIC);
+  hotendPID.SetMode(
+    MANUAL
+  );
 
 
   // ---------------------------------------------------
@@ -1029,34 +1540,47 @@ void setup()
   // ---------------------------------------------------
 
   Serial.println();
-  Serial.println("========================================");
-  Serial.println("        PET HOTEND CONTROLLER");
-  Serial.println("========================================");
+  Serial.println(
+    "========================================"
+  );
+
+  Serial.println(
+    "       PET HOTEND CONTROLLER"
+  );
+
+  Serial.println(
+    "========================================"
+  );
 
   Serial.println();
 
-  Serial.print("Setpoint = ");
-  Serial.print(setpoint);
-  Serial.println(" C");
+  Serial.println(
+    "Commands:"
+  );
 
-  Serial.print("Kp = ");
-  Serial.println(Kp);
+  Serial.println(
+    "a     -> Autotune"
+  );
 
-  Serial.print("Ki = ");
-  Serial.println(Ki);
+  Serial.println(
+    "p     -> PID normal"
+  );
 
-  Serial.print("Kd = ");
-  Serial.println(Kd);
+  Serial.println(
+    "o     -> Heater OFF"
+  );
 
-  Serial.println();
+  Serial.println(
+    "k     -> PID parameters"
+  );
 
-  Serial.println("Command:");
-  Serial.println("a     -> Autotune");
-  Serial.println("p     -> PID normal");
-  Serial.println("o     -> Heater OFF");
-  Serial.println("k     -> Tampilkan PID");
-  Serial.println("s260  -> Setpoint 260 C");
-  Serial.println("h     -> Help");
+  Serial.println(
+    "s260  -> Setpoint 260 C"
+  );
+
+  Serial.println(
+    "h     -> Help"
+  );
 
   Serial.println();
 }
@@ -1069,14 +1593,16 @@ void setup()
 void loop()
 {
   // ---------------------------------------------------
-  // BACA TEMPERATUR
+  // READ TEMPERATURE
   // ---------------------------------------------------
 
   float newTemperature =
     readTemperature();
 
 
-  if (!isnan(newTemperature))
+  if (
+    !isnan(newTemperature)
+  )
   {
     temperatureC =
       newTemperature;
@@ -1087,7 +1613,9 @@ void loop()
   // SAFETY
   // ---------------------------------------------------
 
-  if (!checkSafety())
+  if (
+    !checkSafety()
+  )
   {
     processSerial();
 
@@ -1098,7 +1626,7 @@ void loop()
 
 
   // ---------------------------------------------------
-  // SERIAL COMMAND
+  // SERIAL
   // ---------------------------------------------------
 
   processSerial();
