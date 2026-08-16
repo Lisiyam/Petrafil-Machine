@@ -3,6 +3,7 @@
 #include <PID_v1.h>
 #include <Preferences.h>
 #include <SPI.h>
+#include "soc/gpio_struct.h"
 #include <math.h>
 
 // =====================================================
@@ -77,12 +78,11 @@ constexpr uint8_t EN_PIN = 14;
 
 constexpr unsigned int MIN_STEP_INTERVAL_US = 500;
 constexpr unsigned int MAX_STEP_INTERVAL_US = 5000;
-constexpr unsigned int STEP_PULSE_WIDTH_US = 4;
 
 uint8_t stepperSpeed = 0;
-bool stepPinHigh = false;
-unsigned long lastStepUs = 0;
-unsigned long stepPulseStartedUs = 0;
+uint8_t appliedStepperSpeed = 255;
+hw_timer_t* stepperTimer = nullptr;
+volatile bool stepperPinLevel = false;
 
 
 // =====================================================
@@ -97,7 +97,7 @@ constexpr uint8_t UI_ENC_DT = 18;
 constexpr uint8_t UI_ENC_SW = 23;
 
 constexpr unsigned long BUTTON_DEBOUNCE_MS = 40;
-constexpr int FILAMENT_CM_PER_DETENT = 1;
+constexpr float FILAMENT_CM_PER_DETENT = 0.4;
 
 struct EncoderEvent {
   int8_t rotation;
@@ -188,7 +188,7 @@ private:
 RotaryEncoder lengthEncoder(LENGTH_ENC_CLK, LENGTH_ENC_DT);
 RotaryEncoder uiEncoder(UI_ENC_CLK, UI_ENC_DT, UI_ENC_SW);
 
-long filamentLengthCm = 0;
+float filamentLengthCm = 0.0;
 
 
 // =====================================================
@@ -354,33 +354,60 @@ void serviceHeater() {
 // STEPPER CONTROL
 // =====================================================
 
-unsigned int stepIntervalUs() {
-  return map(stepperSpeed, 1, 255, MAX_STEP_INTERVAL_US, MIN_STEP_INTERVAL_US);
+unsigned int stepIntervalUs(uint8_t speed) {
+  return map(speed, 1, 255, MAX_STEP_INTERVAL_US, MIN_STEP_INTERVAL_US);
+}
+
+void IRAM_ATTR onStepperTimer() {
+  const uint32_t stepMask = 1UL << STEP_PIN;
+
+  if (stepperPinLevel) {
+    GPIO.out_w1tc = stepMask;
+    stepperPinLevel = false;
+  } else {
+    GPIO.out_w1ts = stepMask;
+    stepperPinLevel = true;
+  }
+}
+
+void stopStepperTimer() {
+  if (stepperTimer != nullptr) {
+    timerAlarmDisable(stepperTimer);
+  }
+
+  digitalWrite(STEP_PIN, LOW);
+  digitalWrite(EN_PIN, HIGH);
+  stepperPinLevel = false;
+  appliedStepperSpeed = 0;
+}
+
+void startStepperTimer(uint8_t speed) {
+  if (stepperTimer == nullptr || speed == 0) {
+    stopStepperTimer();
+    return;
+  }
+
+  const unsigned int halfIntervalUs = max<unsigned int>(100, stepIntervalUs(speed) / 2);
+
+  timerAlarmDisable(stepperTimer);
+  timerWrite(stepperTimer, 0);
+  timerAlarmWrite(stepperTimer, halfIntervalUs, true);
+  timerAlarmEnable(stepperTimer);
+
+  digitalWrite(EN_PIN, LOW);
+  appliedStepperSpeed = speed;
 }
 
 void serviceStepper() {
   if (stepperSpeed == 0 || heaterFault) {
-    digitalWrite(STEP_PIN, LOW);
-    digitalWrite(EN_PIN, HIGH);
-    stepPinHigh = false;
+    if (appliedStepperSpeed != 0) {
+      stopStepperTimer();
+    }
     return;
   }
 
-  digitalWrite(EN_PIN, LOW);
-
-  const unsigned long now = micros();
-
-  if (stepPinHigh && (now - stepPulseStartedUs >= STEP_PULSE_WIDTH_US)) {
-    digitalWrite(STEP_PIN, LOW);
-    stepPinHigh = false;
-    return;
-  }
-
-  if (!stepPinHigh && (now - lastStepUs >= stepIntervalUs())) {
-    digitalWrite(STEP_PIN, HIGH);
-    stepPinHigh = true;
-    stepPulseStartedUs = now;
-    lastStepUs = now;
+  if (appliedStepperSpeed != stepperSpeed) {
+    startStepperTimer(stepperSpeed);
   }
 }
 
@@ -396,7 +423,7 @@ void serviceLengthEncoder() {
     filamentLengthCm += event.rotation * FILAMENT_CM_PER_DETENT;
 
     if (filamentLengthCm < 0) {
-      filamentLengthCm = 0;
+      filamentLengthCm = 0.0;
     }
   }
 }
@@ -425,7 +452,7 @@ void renderLoading(uint8_t progress, const String& status) {
 void renderHome() {
   printPadded(0, 0, " PETRAFIL MACHINE ", 20);
   printPadded(0, 1, "suhu    : " + temperatureText() + " C", 20);
-  printPadded(0, 2, "filamen : " + String(filamentLengthCm) + " cm", 20);
+  printPadded(0, 2, "filamen : " + String(filamentLengthCm, 1) + " cm", 20);
   printPadded(0, 3, "stepper : " + String(stepperSpeed) + (heaterFault ? " FAULT" : ""), 20);
 }
 
@@ -510,7 +537,7 @@ void saveCurrentParameter() {
 
 void selectCurrentItem() {
   if (cursor == MenuItem::FilamentReset) {
-    filamentLengthCm = 0;
+    filamentLengthCm = 0.0;
     renderMenu();
     return;
   }
@@ -620,7 +647,7 @@ void printStatus() {
   Serial.print(" | STEP=");
   Serial.print(stepperSpeed);
   Serial.print(" | FILAMENT=");
-  Serial.print(filamentLengthCm);
+  Serial.print(filamentLengthCm, 1);
   Serial.print(" cm | ");
   Serial.println(heaterFault ? "FAULT" : "RUN");
 }
@@ -656,6 +683,9 @@ void setup() {
   digitalWrite(STEP_PIN, LOW);
   digitalWrite(DIR_PIN, HIGH);
   digitalWrite(EN_PIN, HIGH);
+
+  stepperTimer = timerBegin(0, 80, true);
+  timerAttachInterrupt(stepperTimer, &onStepperTimer, true);
 
   lengthEncoder.begin();
   uiEncoder.begin();
