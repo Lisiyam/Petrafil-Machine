@@ -97,7 +97,7 @@ constexpr uint8_t UI_ENC_DT = 18;
 constexpr uint8_t UI_ENC_SW = 23;
 
 constexpr unsigned long BUTTON_DEBOUNCE_MS = 40;
-constexpr float FILAMENT_CM_PER_DETENT = 0.4;
+constexpr int FILAMENT_TENTHS_CM_PER_DETENT = 4;
 
 struct EncoderEvent {
   int8_t rotation;
@@ -185,10 +185,12 @@ private:
   }
 };
 
-RotaryEncoder lengthEncoder(LENGTH_ENC_CLK, LENGTH_ENC_DT);
 RotaryEncoder uiEncoder(UI_ENC_CLK, UI_ENC_DT, UI_ENC_SW);
 
-float filamentLengthCm = 0.0;
+volatile long filamentLengthTenthsCm = 0;
+volatile int8_t lengthEncoderPosition = 0;
+volatile uint8_t previousLengthEncoderState = 0;
+portMUX_TYPE lengthEncoderMux = portMUX_INITIALIZER_UNLOCKED;
 
 
 // =====================================================
@@ -223,7 +225,7 @@ constexpr uint8_t LOADING_BAR_WIDTH = 12;
 constexpr int MIN_SETPOINT_C = 0;
 constexpr int MAX_SETPOINT_C = 270;
 constexpr int MIN_STEPPER_SPEED = 0;
-constexpr int MAX_STEPPER_SPEED = 255;
+constexpr int MAX_STEPPER_SPEED = 100;
 constexpr int DEFAULT_SETPOINT_C = 260;
 constexpr int DEFAULT_STEPPER_SPEED = 0;
 
@@ -355,7 +357,7 @@ void serviceHeater() {
 // =====================================================
 
 unsigned int stepIntervalUs(uint8_t speed) {
-  return map(speed, 1, 255, MAX_STEP_INTERVAL_US, MIN_STEP_INTERVAL_US);
+  return map(speed, 1, MAX_STEPPER_SPEED, MAX_STEP_INTERVAL_US, MIN_STEP_INTERVAL_US);
 }
 
 uint32_t stepFrequencyHz(uint8_t speed) {
@@ -398,16 +400,57 @@ void serviceStepper() {
 // FILAMENT LENGTH
 // =====================================================
 
-void serviceLengthEncoder() {
-  const EncoderEvent event = lengthEncoder.read();
+float filamentLengthCm() {
+  long tenthsCm;
 
-  if (event.rotation != 0) {
-    filamentLengthCm += event.rotation * FILAMENT_CM_PER_DETENT;
+  portENTER_CRITICAL(&lengthEncoderMux);
+  tenthsCm = filamentLengthTenthsCm;
+  portEXIT_CRITICAL(&lengthEncoderMux);
 
-    if (filamentLengthCm < 0) {
-      filamentLengthCm = 0.0;
-    }
+  return tenthsCm / 10.0;
+}
+
+void resetFilamentLength() {
+  portENTER_CRITICAL(&lengthEncoderMux);
+  filamentLengthTenthsCm = 0;
+  lengthEncoderPosition = 0;
+  portEXIT_CRITICAL(&lengthEncoderMux);
+}
+
+void IRAM_ATTR handleLengthEncoderInterrupt() {
+  const uint8_t currentState =
+      (digitalRead(LENGTH_ENC_CLK) << 1) |
+      digitalRead(LENGTH_ENC_DT);
+
+  if (currentState == previousLengthEncoderState) {
+    return;
   }
+
+  const uint8_t transitionIndex = (previousLengthEncoderState << 2) | currentState;
+  const int8_t movement = TRANSITION_TABLE[transitionIndex];
+
+  if (movement != 0) {
+    portENTER_CRITICAL_ISR(&lengthEncoderMux);
+
+    lengthEncoderPosition += movement;
+
+    if (lengthEncoderPosition >= 4) {
+      filamentLengthTenthsCm += FILAMENT_TENTHS_CM_PER_DETENT;
+      lengthEncoderPosition = 0;
+    } else if (lengthEncoderPosition <= -4) {
+      filamentLengthTenthsCm -= FILAMENT_TENTHS_CM_PER_DETENT;
+
+      if (filamentLengthTenthsCm < 0) {
+        filamentLengthTenthsCm = 0;
+      }
+
+      lengthEncoderPosition = 0;
+    }
+
+    portEXIT_CRITICAL_ISR(&lengthEncoderMux);
+  }
+
+  previousLengthEncoderState = currentState;
 }
 
 
@@ -434,8 +477,8 @@ void renderLoading(uint8_t progress, const String& status) {
 void renderHome() {
   printPadded(0, 0, " PETRAFIL MACHINE ", 20);
   printPadded(0, 1, "suhu    : " + temperatureText() + " C", 20);
-  printPadded(0, 2, "filamen : " + String(filamentLengthCm, 1) + " cm", 20);
-  printPadded(0, 3, "stepper : " + String(stepperSpeed) + (heaterFault ? " FAULT" : ""), 20);
+  printPadded(0, 2, "filamen : " + String(filamentLengthCm(), 1) + " cm", 20);
+  printPadded(0, 3, "stepper : " + String(stepperSpeed) + "%" + (heaterFault ? " FAULT" : ""), 20);
 }
 
 void renderMenu() {
@@ -446,7 +489,7 @@ void renderMenu() {
 
   printPadded(0, 0, String(onFilament ? ">" : " ") + "filamen: reset", 20);
   printPadded(0, 1, String(onTemperature ? ">" : " ") + "suhu   : " + String(static_cast<int>(setpointC)) + (editMode && onTemperature ? "*" : " ") + " C", 20);
-  printPadded(0, 2, String(onStepper ? ">" : " ") + "stepper: " + String(stepperSpeed) + (editMode && onStepper ? "*" : " "), 20);
+  printPadded(0, 2, String(onStepper ? ">" : " ") + "stepper: " + String(stepperSpeed) + "%" + (editMode && onStepper ? "*" : " "), 20);
   printPadded(0, 3, String(onExit ? ">" : " ") + "      exit", 20);
 }
 
@@ -519,7 +562,7 @@ void saveCurrentParameter() {
 
 void selectCurrentItem() {
   if (cursor == MenuItem::FilamentReset) {
-    filamentLengthCm = 0.0;
+    resetFilamentLength();
     renderMenu();
     return;
   }
@@ -628,12 +671,24 @@ void printStatus() {
   Serial.print(heaterPWM);
   Serial.print(" | STEP=");
   Serial.print(stepperSpeed);
+  Serial.print("%");
   Serial.print(" | FILAMENT=");
-  Serial.print(filamentLengthCm, 1);
+  Serial.print(filamentLengthCm(), 1);
   Serial.print(" cm | ");
   Serial.println(heaterFault ? "FAULT" : "RUN");
 }
 
+void beginLengthEncoder() {
+  pinMode(LENGTH_ENC_CLK, INPUT_PULLUP);
+  pinMode(LENGTH_ENC_DT, INPUT_PULLUP);
+
+  previousLengthEncoderState =
+      (digitalRead(LENGTH_ENC_CLK) << 1) |
+      digitalRead(LENGTH_ENC_DT);
+
+  attachInterrupt(digitalPinToInterrupt(LENGTH_ENC_CLK), handleLengthEncoderInterrupt, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(LENGTH_ENC_DT), handleLengthEncoderInterrupt, CHANGE);
+}
 
 // =====================================================
 // SETUP
@@ -648,7 +703,10 @@ void setup() {
 
   preferences.begin("petrafil", false);
   setpointC = preferences.getInt("setpoint", DEFAULT_SETPOINT_C);
-  stepperSpeed = preferences.getUChar("stepper", DEFAULT_STEPPER_SPEED);
+  stepperSpeed = constrain(
+      preferences.getUChar("stepper", DEFAULT_STEPPER_SPEED),
+      MIN_STEPPER_SPEED,
+      MAX_STEPPER_SPEED);
 
   pinMode(ADS_CS, OUTPUT);
   digitalWrite(ADS_CS, HIGH);
@@ -668,7 +726,7 @@ void setup() {
   ledcAttachPin(STEP_PIN, STEP_PWM_CHANNEL);
   stopStepperPulse();
 
-  lengthEncoder.begin();
+  beginLengthEncoder();
   uiEncoder.begin();
 
   hotendPID.SetOutputLimits(0, 255);
@@ -696,7 +754,6 @@ void loop() {
   serviceTemperature();
   serviceHeater();
   serviceStepper();
-  serviceLengthEncoder();
   serviceDisplay();
   printStatus();
 }
