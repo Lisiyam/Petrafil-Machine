@@ -3,7 +3,6 @@
 #include <PID_v1.h>
 #include <Preferences.h>
 #include <SPI.h>
-#include "soc/gpio_struct.h"
 #include <math.h>
 
 // =====================================================
@@ -75,15 +74,15 @@ PID hotendPID(&temperatureC, &pidOutput, &setpointC, Kp, Ki, Kd, DIRECT);
 constexpr uint8_t STEP_PIN = 27;
 constexpr uint8_t DIR_PIN = 26;
 constexpr uint8_t EN_PIN = 14;
+constexpr uint8_t STEP_PWM_CHANNEL = 1;
+constexpr uint8_t STEP_PWM_RES = 8;
 
 constexpr unsigned int MIN_STEP_INTERVAL_US = 500;
 constexpr unsigned int MAX_STEP_INTERVAL_US = 30000;
 constexpr uint8_t STEPPER_DIRECTION = LOW;
 
 uint8_t stepperSpeed = 0;
-uint8_t appliedStepperSpeed = 255;
-hw_timer_t* stepperTimer = nullptr;
-volatile bool stepperPinLevel = false;
+int16_t appliedStepperSpeed = -1;
 
 
 // =====================================================
@@ -359,56 +358,38 @@ unsigned int stepIntervalUs(uint8_t speed) {
   return map(speed, 1, 255, MAX_STEP_INTERVAL_US, MIN_STEP_INTERVAL_US);
 }
 
-void IRAM_ATTR onStepperTimer() {
-  const uint32_t stepMask = 1UL << STEP_PIN;
-
-  if (stepperPinLevel) {
-    GPIO.out_w1tc = stepMask;
-    stepperPinLevel = false;
-  } else {
-    GPIO.out_w1ts = stepMask;
-    stepperPinLevel = true;
-  }
+uint32_t stepFrequencyHz(uint8_t speed) {
+  return 1000000UL / stepIntervalUs(speed);
 }
 
-void stopStepperTimer() {
-  if (stepperTimer != nullptr) {
-    timerAlarmDisable(stepperTimer);
-  }
-
-  digitalWrite(STEP_PIN, LOW);
+void stopStepperPulse() {
+  ledcWrite(STEP_PWM_CHANNEL, 0);
   digitalWrite(EN_PIN, HIGH);
-  stepperPinLevel = false;
   appliedStepperSpeed = 0;
 }
 
-void startStepperTimer(uint8_t speed) {
-  if (stepperTimer == nullptr || speed == 0) {
-    stopStepperTimer();
+void applyStepperSpeed(uint8_t speed) {
+  if (speed == 0) {
+    stopStepperPulse();
     return;
   }
 
-  const unsigned int halfIntervalUs = max<unsigned int>(100, stepIntervalUs(speed) / 2);
-
-  timerAlarmDisable(stepperTimer);
-  timerWrite(stepperTimer, 0);
-  timerAlarmWrite(stepperTimer, halfIntervalUs, true);
-  timerAlarmEnable(stepperTimer);
-
   digitalWrite(EN_PIN, LOW);
+  ledcSetup(STEP_PWM_CHANNEL, stepFrequencyHz(speed), STEP_PWM_RES);
+  ledcWrite(STEP_PWM_CHANNEL, 128);
   appliedStepperSpeed = speed;
 }
 
 void serviceStepper() {
   if (stepperSpeed == 0 || heaterFault) {
     if (appliedStepperSpeed != 0) {
-      stopStepperTimer();
+      stopStepperPulse();
     }
     return;
   }
 
   if (appliedStepperSpeed != stepperSpeed) {
-    startStepperTimer(stepperSpeed);
+    applyStepperSpeed(stepperSpeed);
   }
 }
 
@@ -681,12 +662,11 @@ void setup() {
   pinMode(STEP_PIN, OUTPUT);
   pinMode(DIR_PIN, OUTPUT);
   pinMode(EN_PIN, OUTPUT);
-  digitalWrite(STEP_PIN, LOW);
   digitalWrite(DIR_PIN, STEPPER_DIRECTION);
   digitalWrite(EN_PIN, HIGH);
-
-  stepperTimer = timerBegin(0, 80, true);
-  timerAttachInterrupt(stepperTimer, &onStepperTimer, true);
+  ledcSetup(STEP_PWM_CHANNEL, stepFrequencyHz(1), STEP_PWM_RES);
+  ledcAttachPin(STEP_PIN, STEP_PWM_CHANNEL);
+  stopStepperPulse();
 
   lengthEncoder.begin();
   uiEncoder.begin();
