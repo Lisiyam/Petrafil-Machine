@@ -77,7 +77,8 @@ constexpr uint8_t DIR_PIN = 26;
 constexpr uint8_t EN_PIN = 14;
 
 constexpr unsigned int MIN_STEP_INTERVAL_US = 500;
-constexpr unsigned int MAX_STEP_INTERVAL_US = 5000;
+constexpr unsigned int MAX_STEP_INTERVAL_US = 30000;
+constexpr uint8_t STEPPER_DIRECTION = LOW;
 
 uint8_t stepperSpeed = 0;
 uint8_t appliedStepperSpeed = 255;
@@ -681,7 +682,7 @@ void setup() {
   pinMode(DIR_PIN, OUTPUT);
   pinMode(EN_PIN, OUTPUT);
   digitalWrite(STEP_PIN, LOW);
-  digitalWrite(DIR_PIN, HIGH);
+  digitalWrite(DIR_PIN, STEPPER_DIRECTION);
   digitalWrite(EN_PIN, HIGH);
 
   stepperTimer = timerBegin(0, 80, true);
