@@ -96,7 +96,7 @@ constexpr uint8_t UI_ENC_CLK = 19;
 constexpr uint8_t UI_ENC_DT = 18;
 constexpr uint8_t UI_ENC_SW = 23;
 
-constexpr unsigned long BUTTON_DEBOUNCE_MS = 40;
+constexpr unsigned long BUTTON_DEBOUNCE_MS = 80;
 constexpr int FILAMENT_TENTHS_CM_PER_DETENT = 4;
 
 struct EncoderEvent {
@@ -119,7 +119,8 @@ public:
         swPin(swPin),
         previousState(0),
         position(0),
-        previousButtonState(HIGH),
+        rawButtonState(HIGH),
+        stableButtonState(HIGH),
         lastButtonChangeMs(0) {}
 
   void begin() {
@@ -128,7 +129,9 @@ public:
 
     if (hasButton()) {
       pinMode(swPin, INPUT_PULLUP);
-      previousButtonState = digitalRead(swPin);
+      rawButtonState = digitalRead(swPin);
+      stableButtonState = rawButtonState;
+      lastButtonChangeMs = millis();
     }
 
     previousState = (digitalRead(clkPin) << 1) | digitalRead(dtPin);
@@ -155,14 +158,18 @@ public:
     }
 
     if (hasButton()) {
-      const bool buttonState = digitalRead(swPin);
+      const bool currentButtonState = digitalRead(swPin);
       const unsigned long now = millis();
 
-      if (buttonState != previousButtonState && (now - lastButtonChangeMs) > BUTTON_DEBOUNCE_MS) {
+      if (currentButtonState != rawButtonState) {
+        rawButtonState = currentButtonState;
         lastButtonChangeMs = now;
-        previousButtonState = buttonState;
+      }
 
-        if (buttonState == LOW) {
+      if (rawButtonState != stableButtonState && (now - lastButtonChangeMs) >= BUTTON_DEBOUNCE_MS) {
+        stableButtonState = rawButtonState;
+
+        if (stableButtonState == LOW) {
           event.clicked = true;
         }
       }
@@ -177,7 +184,8 @@ private:
   uint8_t swPin;
   uint8_t previousState;
   int8_t position;
-  bool previousButtonState;
+  bool rawButtonState;
+  bool stableButtonState;
   unsigned long lastButtonChangeMs;
 
   bool hasButton() const {
