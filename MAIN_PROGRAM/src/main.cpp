@@ -60,9 +60,9 @@ double pidOutput = 0.0;
 uint8_t heaterPWM = 0;
 bool heaterFault = false;
 
-double Kp = 19.192109;
-double Ki = 0.366318;
-double Kd = 251.378249;
+double Kp = 9.43;
+double Ki = 0.0455;
+double Kd = 23.30;
 
 PID hotendPID(&temperatureC, &pidOutput, &setpointC, Kp, Ki, Kd, DIRECT);
 
