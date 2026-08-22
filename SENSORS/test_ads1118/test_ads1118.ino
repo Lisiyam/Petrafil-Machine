@@ -38,6 +38,62 @@ const uint16_t ADS_CONFIG = 0xC383;
 
 
 // =====================================================
+// KONFIGURASI FILTER EMA
+// =====================================================
+//
+// EMA_ALPHA menentukan seberapa cepat filter merespons
+// perubahan suhu:
+//
+//   - kecil (0.05 - 0.1) -> sangat halus, respons lambat
+//   - besar (0.3 - 0.8)  -> responsif, kurang meredam noise
+//
+// Untuk suhu hotend PET (perubahan relatif lambat),
+// nilai 0.1 - 0.15 biasanya cocok.
+//
+// =====================================================
+
+#define EMA_ALPHA   0.12
+
+float temperatureFiltered = NAN;   // hasil suhu setelah difilter
+bool  emaInitialized      = false; // flag inisialisasi pertama kali
+
+
+// =====================================================
+// KONFIGURASI PWM (KONTROL HEATER VIA MOSFET IRFZ44N)
+// =====================================================
+
+#define PWM_PIN     25
+const uint32_t PWM_FREQ = 5000;  // 5 kHz
+const uint8_t  PWM_RES  = 8;     // 8-bit -> 0-255
+
+int pwmValue = 0;   // nilai PWM aktif saat ini (0-255)
+
+
+// =====================================================
+// KALIBRASI SUHU (regresi kuadratik dari data referensi)
+// =====================================================
+//
+// Persamaan: T_kalibrasi = A*x^2 + B*x + C
+// x = suhu hasil EMA (temperatureFiltered)
+//
+// Didapat dari fitting 10 titik data (PWM vs suhu ref
+// vs suhu terbaca sensor), R^2 = 0.9999
+//
+// CATATAN: valid untuk rentang ~54-232°C (rentang data
+// kalibrasi). Untuk area kerja mendekati 260°C, sebaiknya
+// tambahkan titik data kalibrasi baru di 250-270°C agar
+// tidak ekstrapolasi terlalu jauh dari data asli.
+//
+// =====================================================
+
+#define CAL_A   -0.0012123207788950524
+#define CAL_B    1.1994562204279697
+#define CAL_C   -6.731294736362334
+
+float temperatureCalibrated = NAN;  // suhu akhir setelah EMA + kalibrasi
+
+
+// =====================================================
 // READ ADS1118
 // =====================================================
 
@@ -92,6 +148,49 @@ float calculateTemperature(float resistance)
 
 
 // =====================================================
+// FILTER EMA UNTUK SUHU
+// =====================================================
+
+float applyEMA(float newValue)
+{
+  if (isnan(newValue))
+  {
+    // Kalau pembacaan gagal, pertahankan nilai filter
+    // sebelumnya (jangan rusak filter karena satu bacaan buruk)
+    return temperatureFiltered;
+  }
+
+  if (!emaInitialized)
+  {
+    // Inisialisasi pertama kali langsung pakai nilai asli,
+    // supaya filter tidak mulai dari 0 / naik pelan dari awal
+    emaInitialized = true;
+    return newValue;
+  }
+
+  return (EMA_ALPHA * newValue) +
+         ((1.0 - EMA_ALPHA) * temperatureFiltered);
+}
+
+
+// =====================================================
+// KALIBRASI SUHU (KUADRATIK)
+// =====================================================
+
+float calibrateTemperature(float tRaw)
+{
+  if (isnan(tRaw))
+  {
+    return NAN;
+  }
+
+  return (CAL_A * tRaw * tRaw) +
+         (CAL_B * tRaw) +
+         CAL_C;
+}
+
+
+// =====================================================
 // SETUP
 // =====================================================
 
@@ -112,8 +211,31 @@ void setup()
   delay(1000);
 
   Serial.println("========================================");
-  Serial.println("       ADS1118 - NTC 100K B3950");
+  Serial.println("  ADS1118 - NTC 100K B3950 (+ Filter EMA)");
   Serial.println("========================================");
+
+
+  // ---------------------------------------------------
+  // Inisialisasi PWM (heater control)
+  // ---------------------------------------------------
+
+  if (!ledcAttach(PWM_PIN, PWM_FREQ, PWM_RES))
+  {
+    Serial.println("Gagal attach PWM!");
+  }
+  else
+  {
+    // Awal PWM = 0 (heater mati)
+    ledcWrite(PWM_PIN, 0);
+
+    Serial.println("=== PWM HEATER ===");
+    Serial.println("Pin      : GPIO 25");
+    Serial.println("Frequency: 5 kHz");
+    Serial.println("Resolusi : 8-bit");
+    Serial.println("Range    : 0-255");
+    Serial.println();
+    Serial.println("Masukkan nilai PWM (0-255) via Serial:");
+  }
 }
 
 
@@ -182,7 +304,7 @@ void loop()
 
 
   // ---------------------------------------------------
-  // RESISTANSI NTC -> SUHU
+  // RESISTANSI NTC -> SUHU (mentah / belum difilter)
   // ---------------------------------------------------
 
   float temperatureC = NAN;
@@ -192,6 +314,20 @@ void loop()
     temperatureC =
       calculateTemperature(ntcResistance);
   }
+
+
+  // ---------------------------------------------------
+  // FILTER EMA
+  // ---------------------------------------------------
+
+  temperatureFiltered = applyEMA(temperatureC);
+
+
+  // ---------------------------------------------------
+  // KALIBRASI (koreksi kuadratik)
+  // ---------------------------------------------------
+
+  temperatureCalibrated = calibrateTemperature(temperatureFiltered);
 
 
   // ---------------------------------------------------
@@ -209,9 +345,45 @@ void loop()
   Serial.print(ntcResistance, 2);
   Serial.print(" Ohm");
 
-  Serial.print("    Temperature = ");
+  Serial.print("    Temp Raw = ");
   Serial.print(temperatureC, 2);
+  Serial.print(" °C");
+
+  Serial.print("    Temp EMA = ");
+  Serial.print(temperatureFiltered, 2);
+  Serial.print(" °C");
+
+  Serial.print("    Temp Kalibrasi = ");
+  Serial.print(temperatureCalibrated, 2);
   Serial.println(" °C");
+
+
+  // ---------------------------------------------------
+  // KONTROL PWM DARI SERIAL
+  // ---------------------------------------------------
+
+  if (Serial.available() > 0)
+  {
+    int inputValue = Serial.parseInt();
+
+    // Pastikan nilai berada dalam range 0-255
+    pwmValue = constrain(inputValue, 0, 255);
+
+    // Set PWM
+    ledcWrite(PWM_PIN, pwmValue);
+
+    Serial.print("PWM = ");
+    Serial.print(pwmValue);
+    Serial.print(" | Duty Cycle = ");
+    Serial.print((pwmValue / 255.0) * 100.0, 1);
+    Serial.println("%");
+
+    // Bersihkan sisa karakter newline
+    while (Serial.available())
+    {
+      Serial.read();
+    }
+  }
 
 
   delay(500);
